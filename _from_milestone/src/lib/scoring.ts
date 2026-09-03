@@ -1,0 +1,112 @@
+/** Normal study sessions: 0.5 EXP per hour → 1 EXP per 2 hours. */
+export const NORMAL_EXP_PER_HOUR = 0.5;
+
+/** Tutorial sessions are 3× normal (= 1.5 EXP/hour). */
+export const TUTORIAL_EXP_PER_HOUR = NORMAL_EXP_PER_HOUR * 3;
+
+/** Solo (and profile) session rate bounds — one decimal place. */
+export const MIN_SESSION_EXP_PER_HOUR = 0;
+export const MAX_SESSION_EXP_PER_HOUR = 10;
+
+/** New Solo Challenge accounts start at 0 EXP/hour until the user sets a rate. */
+export const SOLO_DEFAULT_SESSION_EXP_PER_HOUR = 0;
+
+/** Creator rule: 20 EXP converts to 1 gem when the user taps Convert. */
+export const EXP_PER_GEM = 20;
+
+/** Clamp hourly EXP rate to 0–10, one decimal. */
+export function clampSessionExpPerHour(rate: number): number {
+  if (!Number.isFinite(rate)) return NORMAL_EXP_PER_HOUR;
+  const clamped = Math.min(
+    MAX_SESSION_EXP_PER_HOUR,
+    Math.max(MIN_SESSION_EXP_PER_HOUR, rate),
+  );
+  return Math.round(clamped * 10) / 10;
+}
+
+export function contributionFromTask(gem: number, exp: number) {
+  return gem * EXP_PER_GEM + exp;
+}
+
+/** Largest multiple of 20 EXP that can be converted right now. */
+export function convertibleExp(availableExp: number): number {
+  if (!Number.isFinite(availableExp) || availableExp < EXP_PER_GEM) return 0;
+  return Math.floor(availableExp / EXP_PER_GEM) * EXP_PER_GEM;
+}
+
+export function gemsFromConvertedExp(convertedExp: number): number {
+  if (!Number.isFinite(convertedExp) || convertedExp <= 0) return 0;
+  return Math.floor(convertedExp / EXP_PER_GEM);
+}
+
+/** Banked gems from Convert + task gems (integers). */
+export function displayGems(taskGems: number, convertedExp: number): number {
+  return Math.max(0, Math.floor(taskGems) + gemsFromConvertedExp(convertedExp));
+}
+
+/**
+ * Effective gems from EXP + task gems (fractional).
+ * UI should display Math.floor(...) for whole gems.
+ */
+export function totalEffectiveGems(totalExp: number, totalGems: number) {
+  return totalExp / EXP_PER_GEM + totalGems;
+}
+
+/**
+ * Round EXP to nearest 0.1, then return one-decimal number.
+ * Tutorials always use ×3. Non-tutorials use `expPerHour` when provided
+ * (subject profile rate; may be 0), else the normal 0.5 default.
+ */
+export function calculateSessionExp(
+  durationSeconds: number,
+  isTutorial: boolean,
+  expPerHour?: number,
+): number {
+  const hours = durationSeconds / 3600;
+  const rate = isTutorial
+    ? TUTORIAL_EXP_PER_HOUR
+    : clampSessionExpPerHour(
+        expPerHour === undefined ? NORMAL_EXP_PER_HOUR : expPerHour,
+      );
+  const raw = hours * rate;
+  return Math.round(raw * 10) / 10;
+}
+
+/** Haversine distance in meters. */
+export function distanceMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const R = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+export const LOCATION_CONSISTENCY_METERS = 150;
+
+export function categoryFromTaskNo(taskNo: string): string {
+  const upper = taskNo.toUpperCase();
+  if (upper.startsWith("MATH_S4")) return "math_s4";
+  if (upper.startsWith("MATH_")) return "math_s23";
+  if (upper.startsWith("ENG_WRITING")) return "eng_writing";
+  if (upper.startsWith("ENG_VOCAB")) return "eng_vocab";
+  if (upper.startsWith("ENG_SPEAK")) return "eng_speaking";
+  if (upper.startsWith("SOC_") || upper.startsWith("COMMUNITY"))
+    return "community";
+  return "math_s23";
+}
+
+export function formatDuration(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return [h, m, sec].map((n) => String(n).padStart(2, "0")).join(" : ");
+}

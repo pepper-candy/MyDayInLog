@@ -1,0 +1,265 @@
+import { NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
+import { hasNickname, invitationToEmail, normalizeInvitationCode } from "@/lib/auth";
+import {
+  isInviteCodeAvailable,
+  isInviteCodeFormatValid,
+  normalizeInviteCodeInput,
+} from "@/lib/invitation-code";
+import { createAdminClient } from "@/lib/supabase/admin";
+
+export async function POST(request: Request) {
+  try {
+    const body = (await request.json()) as {
+      code?: string;
+      createMentor?: boolean;
+      createSolo?: boolean;
+    };
+    const code = normalizeInviteCodeInput(
+      normalizeInvitationCode(body.code ?? ""),
+    );
+    if (!code) {
+      return NextResponse.json(
+        { error: "Please enter your invitation code first." },
+        { status: 400 },
+      );
+    }
+
+    if (!isInviteCodeFormatValid(code)) {
+      return NextResponse.json(
+        { error: "Use 5 letters or numbers" },
+        { status: 400 },
+      );
+    }
+
+    if (body.createMentor === true && body.createSolo === true) {
+      return NextResponse.json(
+        { error: "Choose mentor or solo signup, not both." },
+        { status: 400 },
+      );
+    }
+
+    const email = invitationToEmail(code);
+    const password = code;
+    const supabase = await createClient();
+
+    // Public mentor onboarding: provision parent for an unused code, then sign in.
+    if (body.createMentor === true) {
+      const available = await isInviteCodeAvailable(supabase, code);
+      if (!available) {
+        return NextResponse.json(
+          { error: "This code is already used. Try Start as a Mentor again." },
+          { status: 409 },
+        );
+      }
+
+      let admin;
+      try {
+        admin = createAdminClient();
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Mentor signup unavailable";
+        return NextResponse.json({ error: message }, { status: 503 });
+      }
+
+      const { data: created, error: createError } =
+        await admin.auth.admin.createUser({
+          email,
+          password,
+          email_confirm: true,
+          user_metadata: {
+            invitation_code: code,
+            is_child: false,
+            is_solo: false,
+            linked_parents: [],
+            linked_children: [],
+            nickname: "",
+          },
+        });
+
+      if (createError || !created.user) {
+        const msg = createError?.message?.toLowerCase() ?? "";
+        if (msg.includes("already") || msg.includes("registered")) {
+          return NextResponse.json(
+            { error: "This code is already used. Try Start as a Mentor again." },
+            { status: 409 },
+          );
+        }
+        return NextResponse.json(
+          { error: createError?.message || "Could not create mentor account" },
+          { status: 500 },
+        );
+      }
+
+      const { error: profileError } = await admin.from("profiles").insert({
+        id: created.user.id,
+        invitation_code: code,
+        nickname: null,
+        avatar_url: null,
+        is_child: false,
+        is_solo: false,
+        linked_parents: [],
+        linked_children: [],
+      });
+
+      if (profileError) {
+        await admin.auth.admin.deleteUser(created.user.id);
+        return NextResponse.json(
+          { error: profileError.message },
+          { status: 500 },
+        );
+      }
+    }
+
+    // Solo Challenge: single child+solo account, no first mentee / family links.
+    if (body.createSolo === true) {
+      const available = await isInviteCodeAvailable(supabase, code);
+      if (!available) {
+        return NextResponse.json(
+          {
+            error:
+              "This code is already used. Try Start a Solo Challenge again.",
+          },
+          { status: 409 },
+        );
+      }
+
+      let admin;
+      try {
+        admin = createAdminClient();
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Solo signup unavailable";
+        return NextResponse.json({ error: message }, { status: 503 });
+      }
+
+      const { data: created, error: createError } =
+        await admin.auth.admin.createUser({
+          email,
+          password,
+          email_confirm: true,
+          user_metadata: {
+            invitation_code: code,
+            is_child: true,
+            is_solo: true,
+            linked_parents: [],
+            linked_children: [],
+            nickname: "",
+          },
+        });
+
+      if (createError || !created.user) {
+        const msg = createError?.message?.toLowerCase() ?? "";
+        if (msg.includes("already") || msg.includes("registered")) {
+          return NextResponse.json(
+            {
+              error:
+                "This code is already used. Try Start a Solo Challenge again.",
+            },
+            { status: 409 },
+          );
+        }
+        return NextResponse.json(
+          { error: createError?.message || "Could not create solo account" },
+          { status: 500 },
+        );
+      }
+
+      const { error: profileError } = await admin.from("profiles").insert({
+        id: created.user.id,
+        invitation_code: code,
+        nickname: null,
+        avatar_url: null,
+        is_child: true,
+        is_solo: true,
+        linked_parents: [],
+        linked_children: [],
+        session_exp_per_hour: 0,
+      });
+
+      if (profileError) {
+        await admin.auth.admin.deleteUser(created.user.id);
+        const hint = /is_solo|session_exp_per_hour|column/i.test(
+          profileError.message,
+        )
+          ? " Run scripts/migrate_solo_challenge.sql in the Supabase SQL Editor."
+          : "";
+        return NextResponse.json(
+          { error: `${profileError.message}${hint}` },
+          { status: 500 },
+        );
+      }
+    }
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (error || !data.user) {
+      const message = error?.message?.toLowerCase() ?? "";
+      if (
+        message.includes("already logged") ||
+        message.includes("session") ||
+        message.includes("another device")
+      ) {
+        return NextResponse.json(
+          { error: "Already logged in on another device" },
+          { status: 403 },
+        );
+      }
+      return NextResponse.json({ error: "Invalid code" }, { status: 401 });
+    }
+
+    const user = data.user;
+    const meta = user.user_metadata ?? {};
+
+    // Ensure a profile row exists (created manually in Supabase for invites)
+    const { data: existing } = await supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", user.id)
+      .maybeSingle();
+
+    let nickname = existing?.nickname as string | null | undefined;
+    if (nickname == null || nickname === "") {
+      nickname = (meta.nickname as string | undefined) || null;
+    }
+
+    if (!existing) {
+      await supabase.from("profiles").upsert({
+        id: user.id,
+        invitation_code: code.toUpperCase(),
+        nickname: hasNickname(nickname) ? nickname : null,
+        avatar_url: null,
+        is_child: meta.is_child ?? true,
+        is_solo: meta.is_solo ?? false,
+        linked_parents: meta.linked_parents ?? [],
+        linked_children: meta.linked_children ?? [],
+      });
+    }
+
+    const isChild =
+      (existing?.is_child as boolean | undefined) ??
+      (meta.is_child as boolean | undefined) ??
+      true;
+    const isSolo =
+      Boolean(existing?.is_solo ?? meta.is_solo ?? false) && isChild;
+    const linkedChildren = (
+      (existing?.linked_children as string[] | null | undefined) ??
+      (meta.linked_children as string[] | undefined) ??
+      []
+    ).filter(Boolean);
+
+    return NextResponse.json({
+      ok: true,
+      nickname: hasNickname(nickname) ? nickname : null,
+      needsSetup: !hasNickname(nickname),
+      isChild,
+      isSolo,
+      needsFirstChild: !isChild && !isSolo && linkedChildren.length === 0,
+    });
+  } catch {
+    return NextResponse.json({ error: "Login failed" }, { status: 500 });
+  }
+}

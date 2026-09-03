@@ -1,0 +1,751 @@
+"use client";
+
+import {
+  EnvironmentCheckPanel,
+  type EnvironmentCheckHandle,
+  type EnvironmentEvidencePayload,
+} from "@/components/timer/EnvironmentalCheck";
+import { DurationClock } from "@/components/ui/DurationClock";
+import { BoltIcon } from "@/components/ui/Icons";
+import { PartyPopBurst } from "@/components/ui/PartyPopBurst";
+import { SwipeToEnter } from "@/components/ui/SwipeToEnter";
+import { useSessionClock } from "@/hooks/useGeolocation";
+import { notifyFamilySync } from "@/lib/family-sync";
+import type { ActiveSessionState, Session } from "@/types";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState, useTransition } from "react";
+
+type SessionTimerProps = {
+  isChild: boolean;
+  /** Solo Challenge: no GPS / env check; not a tutorial; optional note on claim. */
+  isSolo?: boolean;
+  active: ActiveSessionState | null;
+  onActiveChange: (next: ActiveSessionState | null) => void;
+  /** Child subject id(s) for family-sync pings after session changes. */
+  subjectIds?: string[];
+  /** Recent prior session notes for solo bubble shortcuts (newest-first, max 10). */
+  recentSessionNotes?: string[];
+};
+
+const DRAG_THRESHOLD = 40;
+
+const sheetShellClass =
+  "fixed inset-x-0 bottom-0 z-40 mx-auto w-full max-w-[475px] rounded-t-[24px] bg-[rgba(255,250,242,0.97)] px-5 pb-6 pt-3 shadow-[0px_-4px_32px_0px_rgba(200,146,42,0.12)]";
+
+export function SessionTimer({
+  isChild,
+  isSolo = false,
+  active,
+  onActiveChange,
+  subjectIds = [],
+  recentSessionNotes = [],
+}: SessionTimerProps) {
+  const router = useRouter();
+  const [, startTransition] = useTransition();
+  const [phase, setPhase] = useState<"idle" | "start-check" | "end-check">(
+    "idle",
+  );
+  /** Mentors run tutorial sessions (×3 EXP, no environment check). Solo is not tutorial. */
+  const tutorial = !isChild && !isSolo;
+  /** Solo and mentor tutorials skip GPS / environment sheet. */
+  const skipEnvCheck = tutorial || isSolo;
+  const [error, setError] = useState<string | null>(null);
+  const [swipeKey, setSwipeKey] = useState(0);
+  /** Finished session awaiting claim swipe (shown in the bottom sheet). */
+  const [completed, setCompleted] = useState<Session | null>(null);
+  /** Blocks kickstart/env-check render while ending session settles. */
+  const [claimPending, setClaimPending] = useState(false);
+  /** Session sheet collapsed to slim bar (active sessions only). */
+  const [sheetCollapsed, setSheetCollapsed] = useState(false);
+  const [sessionNote, setSessionNote] = useState("");
+  const noteBubbles = recentSessionNotes
+    .map((n) => n.trim())
+    .filter(Boolean)
+    .slice(0, 10);
+
+  const checkOpen = phase === "start-check" || phase === "end-check";
+  const [dragDelta, setDragDelta] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const [checkNaturalHeight, setCheckNaturalHeight] = useState(180);
+  const [activeBodyNaturalHeight, setActiveBodyNaturalHeight] = useState(220);
+
+  const dragging = useRef(false);
+  const didDrag = useRef(false);
+  const startY = useRef(0);
+  const dragDeltaRef = useRef(0);
+  const checkOpenRef = useRef(checkOpen);
+  const sheetCollapsedRef = useRef(sheetCollapsed);
+  const checkInnerRef = useRef<HTMLDivElement>(null);
+  const activeBodyInnerRef = useRef<HTMLDivElement>(null);
+  const envRef = useRef<EnvironmentCheckHandle>(null);
+
+  const elapsed = useSessionClock(
+    active?.startedAt ?? null,
+    active?.serverNow ?? null,
+  );
+
+  const requireEvidence = active
+    ? Boolean(active && !active.isTutorial && !isSolo)
+    : !skipEnvCheck;
+
+  useEffect(() => {
+    checkOpenRef.current = checkOpen;
+  }, [checkOpen]);
+
+  useEffect(() => {
+    sheetCollapsedRef.current = sheetCollapsed;
+  }, [sheetCollapsed]);
+
+  useEffect(() => {
+    const inner = checkInnerRef.current;
+    if (!inner) return;
+    const measure = () =>
+      setCheckNaturalHeight(inner.getBoundingClientRect().height);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, [checkOpen, requireEvidence, phase, active]);
+
+  useEffect(() => {
+    const inner = activeBodyInnerRef.current;
+    if (!inner) return;
+    const measure = () =>
+      setActiveBodyNaturalHeight(Math.max(inner.scrollHeight, inner.getBoundingClientRect().height));
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, [checkOpen, sheetCollapsed, active, swipeKey]);
+
+  function openCheck(next: "start-check" | "end-check") {
+    setError(null);
+    setSheetCollapsed(false);
+    setPhase(next);
+  }
+
+  function closeCheck() {
+    setPhase("idle");
+    envRef.current?.reset();
+    setSwipeKey((k) => k + 1);
+  }
+
+  async function startSession(payload: EnvironmentEvidencePayload) {
+    setError(null);
+    const res = await fetch("/api/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "start",
+        is_tutorial: tutorial,
+        ...payload,
+      }),
+    });
+    const data = (await res.json()) as {
+      active?: ActiveSessionState;
+      error?: string;
+    };
+    if (!res.ok || !data.active) throw new Error(data.error || "Start failed");
+    onActiveChange(data.active);
+    setPhase("idle");
+    setSheetCollapsed(false);
+    envRef.current?.reset();
+    for (const id of subjectIds) void notifyFamilySync(id, "sessions");
+  }
+
+  async function endSession(payload: EnvironmentEvidencePayload) {
+    // Freeze UI before the request lands so we never flash kickstart / env check.
+    setClaimPending(true);
+    const res = await fetch("/api/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "end", ...payload }),
+    });
+    const data = (await res.json()) as { session?: Session; error?: string };
+    if (!res.ok || !data.session) {
+      setClaimPending(false);
+      throw new Error(data.error || "End failed");
+    }
+    // Claim sheet first; clear active in the same turn so parent+child update together.
+    setCompleted(data.session);
+    setPhase("idle");
+    setSheetCollapsed(false);
+    setDragDelta(0);
+    setIsDragging(false);
+    setSwipeKey((k) => k + 1);
+    setClaimPending(false);
+    onActiveChange(null);
+    for (const id of subjectIds) void notifyFamilySync(id, "sessions");
+  }
+
+  function claimCompleted() {
+    setCompleted(null);
+    setClaimPending(false);
+    setSessionNote("");
+    setSwipeKey((k) => k + 1);
+    setError(null);
+    for (const id of subjectIds) void notifyFamilySync(id, "dashboard");
+    startTransition(() => {
+      router.refresh();
+    });
+  }
+
+  async function claimWithOptionalNote() {
+    if (!completed) {
+      claimCompleted();
+      return;
+    }
+    const trimmed = sessionNote.trim().slice(0, 32);
+    if (isSolo && trimmed) {
+      try {
+        const res = await fetch(`/api/session/${completed.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_note: trimmed }),
+        });
+        if (!res.ok) {
+          const data = (await res.json()) as { error?: string };
+          setError(data.error || "Could not save note");
+          throw new Error(data.error || "Could not save note");
+        }
+      } catch (e) {
+        if (e instanceof Error) setError(e.message);
+        throw e;
+      }
+    }
+    claimCompleted();
+  }
+
+  async function onSwipeComplete() {
+    setError(null);
+    if (!active) {
+      // Mentor tutorial or solo: start immediately (no env check).
+      if (skipEnvCheck) {
+        try {
+          await startSession({});
+          setSwipeKey((k) => k + 1);
+        } catch (e) {
+          if (e instanceof Error) setError(e.message);
+          throw e;
+        }
+        return;
+      }
+      if (phase !== "start-check") {
+        openCheck("start-check");
+        return;
+      }
+      try {
+        const payload = await envRef.current!.confirm();
+        await startSession(payload);
+      } catch (e) {
+        if (e instanceof Error && e.message !== "location") {
+          setError(e.message);
+        }
+        throw e;
+      }
+      return;
+    }
+
+    // Tutorial / solo / no evidence: end without opening env check.
+    if (!requireEvidence) {
+      try {
+        await endSession({});
+      } catch (e) {
+        if (e instanceof Error) setError(e.message);
+        throw e;
+      }
+      return;
+    }
+
+    if (phase !== "end-check") {
+      openCheck("end-check");
+      return;
+    }
+    try {
+      const payload = await envRef.current!.confirm();
+      await endSession(payload);
+    } catch (e) {
+      if (e instanceof Error && e.message !== "location") {
+        setError(e.message);
+      }
+      throw e;
+    }
+  }
+
+  function beginDrag(clientY: number) {
+    dragging.current = true;
+    didDrag.current = false;
+    startY.current = clientY;
+    dragDeltaRef.current = 0;
+    setDragDelta(0);
+    setIsDragging(true);
+  }
+
+  function moveDrag(clientY: number) {
+    if (!dragging.current) return;
+    const delta = clientY - startY.current;
+    if (Math.abs(delta) > 6) didDrag.current = true;
+
+    if (sheetCollapsedRef.current) {
+      // Compact bar: drag up to expand
+      const next = Math.min(0, Math.max(-120, delta));
+      dragDeltaRef.current = next;
+      setDragDelta(next);
+      return;
+    }
+
+    if (checkOpenRef.current) {
+      // Env check open: drag down to tuck check
+      const next = Math.max(0, Math.min(checkNaturalHeight, delta));
+      dragDeltaRef.current = next;
+      setDragDelta(next);
+      return;
+    }
+
+    // Expanded session: drag down collapses sheet; drag up opens check
+    if (active) {
+      if (delta > 0) {
+        const next = Math.max(0, Math.min(activeBodyNaturalHeight, delta));
+        dragDeltaRef.current = next;
+        setDragDelta(next);
+      } else {
+        const next = Math.min(0, Math.max(-checkNaturalHeight, delta));
+        dragDeltaRef.current = next;
+        setDragDelta(next);
+      }
+      return;
+    }
+
+    // Kickstart: drag up opens check
+    const next = Math.min(0, Math.max(-checkNaturalHeight, delta));
+    dragDeltaRef.current = next;
+    setDragDelta(next);
+  }
+
+  function endDrag() {
+    if (!dragging.current) return;
+    dragging.current = false;
+    setIsDragging(false);
+    const offset = dragDeltaRef.current;
+
+    if (sheetCollapsedRef.current) {
+      if (offset <= -DRAG_THRESHOLD) setSheetCollapsed(false);
+      dragDeltaRef.current = 0;
+      setDragDelta(0);
+      return;
+    }
+
+    if (checkOpenRef.current) {
+      if (offset >= DRAG_THRESHOLD) closeCheck();
+      dragDeltaRef.current = 0;
+      setDragDelta(0);
+      return;
+    }
+
+    if (active) {
+      if (offset >= DRAG_THRESHOLD) {
+        setSheetCollapsed(true);
+        closeCheck();
+      } else if (offset <= -DRAG_THRESHOLD && requireEvidence) {
+        openCheck("end-check");
+      }
+      dragDeltaRef.current = 0;
+      setDragDelta(0);
+      return;
+    }
+
+    if (offset <= -DRAG_THRESHOLD && !tutorial) openCheck("start-check");
+    dragDeltaRef.current = 0;
+    setDragDelta(0);
+  }
+
+  // ---- Derived heights / opacities ----
+  const checkHeightResolved = (() => {
+    if (checkOpen) {
+      return Math.max(0, checkNaturalHeight - Math.max(0, dragDelta));
+    }
+    if (sheetCollapsed) return 0;
+    if (active && dragDelta > 0) return 0; // collapsing sheet
+    return Math.max(0, -dragDelta);
+  })();
+
+  const checkOpacity =
+    checkNaturalHeight > 0
+      ? Math.min(1, Math.max(0, checkHeightResolved / checkNaturalHeight))
+      : checkOpen
+        ? 1
+        : 0;
+
+  const activeBodyHeight = (() => {
+    if (!active) return undefined;
+    if (sheetCollapsed) {
+      // peek open while dragging up from compact
+      return Math.max(0, -dragDelta);
+    }
+    // collapsing: shrink body with downward drag
+    if (!checkOpen && dragDelta > 0) {
+      return Math.max(0, activeBodyNaturalHeight - dragDelta);
+    }
+    return activeBodyNaturalHeight;
+  })();
+
+  const activeBodyOpacity = (() => {
+    if (!active) return 1;
+    if (sheetCollapsed) {
+      return Math.min(1, Math.max(0, -dragDelta / 80));
+    }
+    if (!checkOpen && dragDelta > 0) {
+      return Math.max(
+        0,
+        1 - dragDelta / Math.max(activeBodyNaturalHeight, 1),
+      );
+    }
+    return 1;
+  })();
+
+  const compactOpacity = (() => {
+    if (!active) return 0;
+    if (sheetCollapsed) {
+      return Math.max(0, 1 - Math.min(1, -dragDelta / 80));
+    }
+    if (!checkOpen && dragDelta > 0) {
+      return Math.min(1, dragDelta / Math.max(activeBodyNaturalHeight * 0.5, 1));
+    }
+    return 0;
+  })();
+
+  const sheetTransition = isDragging
+    ? "none"
+    : "height 0.4s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.35s ease";
+
+  /** Tap handle / sheet chrome: expand, close check, or collapse (not swipe / env controls). */
+  function onChromeActivate() {
+    if (didDrag.current) {
+      didDrag.current = false;
+      return;
+    }
+    if (sheetCollapsed) {
+      setSheetCollapsed(false);
+      return;
+    }
+    if (checkOpen) {
+      closeCheck();
+      return;
+    }
+    if (active) setSheetCollapsed(true);
+    else if (!tutorial) openCheck("start-check");
+  }
+
+  function renderHandle() {
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        aria-label={
+          sheetCollapsed
+            ? "Drag up or tap to expand session"
+            : checkOpen
+              ? "Drag down or tap to close environment check"
+              : active
+                ? requireEvidence
+                  ? "Drag down to collapse, or up for environment check"
+                  : "Drag down or tap to collapse session"
+                : tutorial
+                  ? "Session ready — swipe to start tutorial"
+                  : "Drag up or tap to open environment check"
+        }
+        className="mb-2 flex cursor-grab touch-none justify-center active:cursor-grabbing"
+        onClick={(e) => {
+          e.stopPropagation();
+          onChromeActivate();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onChromeActivate();
+          }
+        }}
+        onPointerDown={(e) => {
+          e.currentTarget.setPointerCapture(e.pointerId);
+          beginDrag(e.clientY);
+        }}
+        onPointerMove={(e) => moveDrag(e.clientY)}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+      >
+        <div className="h-1 w-8 rounded-full bg-[rgba(200,146,42,0.25)]" />
+      </div>
+    );
+  }
+
+  function renderCheckPanel() {
+    return (
+      <div
+        className="overflow-hidden"
+        style={{
+          height: checkHeightResolved,
+          opacity: checkOpacity,
+          transition: sheetTransition,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div ref={checkInnerRef} className="pb-3">
+          <EnvironmentCheckPanel
+            key={phase}
+            ref={envRef}
+            requireEvidence={requireEvidence}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // -------- Session complete (claim in the same bottom sheet) --------
+  if (completed || claimPending) {
+    const expValue = completed ? Number(completed.exp_earned) : NaN;
+    const exp = Number.isFinite(expValue) ? expValue.toFixed(1) : "…";
+    const showExpEarned = Number.isFinite(expValue) && expValue > 0;
+    return (
+      <div className={`${sheetShellClass} overflow-visible`}>
+        {completed ? <PartyPopBurst /> : null}
+
+        <h2 className="mb-4 flex items-center gap-2 pl-1 text-sm font-semibold uppercase tracking-[1.68px] text-[rgba(28,22,16,0.7)]">
+          <span aria-hidden className="text-base leading-none">
+            🎉
+          </span>
+          Session complete
+        </h2>
+
+        <div
+          className="relative z-10 mb-5 flex flex-col items-center gap-2 rounded-2xl border border-[rgba(200,146,42,0.2)] px-8 py-5"
+          style={{
+            backgroundImage:
+              "linear-gradient(158deg, rgba(252, 221, 166, 0.5) 0%, rgba(223, 238, 243, 0.4) 100%)",
+          }}
+        >
+          {showExpEarned ? (
+            <>
+              <div className="flex items-center gap-2">
+                <p className="text-[11px] font-semibold uppercase tracking-[1.76px] text-[#8a7a68]">
+                  You earned
+                </p>
+                {completed?.is_tutorial ? (
+                  <span className="rounded-full bg-lavender/50 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider">
+                    ×3
+                  </span>
+                ) : null}
+              </div>
+              <div className="flex items-end gap-2">
+                <span className="font-serif text-[48px] leading-none text-gold">
+                  {exp}
+                </span>
+                <span className="mb-2 flex items-center gap-1 text-lg font-semibold text-gold">
+                  <BoltIcon size={20} />
+                  EXP
+                </span>
+              </div>
+              <div className="h-px w-8 bg-[rgba(200,146,42,0.25)]" />
+            </>
+          ) : null}
+          <p className="flex items-center justify-center font-serif text-[36px] leading-none tracking-[2.16px] text-ink">
+            <DurationClock
+              totalSeconds={completed?.duration_seconds ?? elapsed}
+            />
+          </p>
+        </div>
+
+        {completed ? (
+          <>
+            {isSolo ? (
+              <div className="mb-3">
+                <input
+                  id="solo-session-note"
+                  value={sessionNote}
+                  maxLength={32}
+                  onChange={(e) => setSessionNote(e.target.value.slice(0, 32))}
+                  placeholder="What did you work on?"
+                  aria-label="Session note"
+                  className="h-11 w-full rounded-2xl border border-[rgba(200,146,42,0.2)] bg-surface px-4 text-center text-sm text-ink outline-none placeholder:text-[rgba(138,122,104,0.45)] focus:border-gold/50"
+                />
+                {noteBubbles.length > 0 ? (
+                  <div
+                    className="mt-2.5 -mx-1 flex gap-2 overflow-x-auto px-1 pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                    role="list"
+                    aria-label="Recent session notes"
+                  >
+                    {noteBubbles.map((note) => {
+                      const selected = sessionNote.trim() === note;
+                      return (
+                        <button
+                          key={note}
+                          type="button"
+                          role="listitem"
+                          onClick={() => setSessionNote(note.slice(0, 32))}
+                          className={`shrink-0 rounded-full border px-3 py-1.5 text-xs font-medium transition active:scale-[0.97] ${
+                            selected
+                              ? "border-gold/55 bg-[rgba(252,221,166,0.55)] text-ink"
+                              : "border-[rgba(200,146,42,0.22)] bg-[rgba(255,250,242,0.95)] text-[rgba(28,22,16,0.72)]"
+                          }`}
+                        >
+                          {note}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            <SwipeToEnter
+              key={swipeKey}
+              label="Swipe to Claim"
+              onComplete={claimWithOptionalNote}
+            />
+          </>
+        ) : (
+          <p className="py-4 text-center text-sm text-[#8a7a68]">Wrapping up…</p>
+        )}
+      </div>
+    );
+  }
+
+  // -------- Kickstart (no active session) --------
+  if (!active) {
+    return (
+      <div className={sheetShellClass}>
+        {skipEnvCheck ? null : renderHandle()}
+        <div className="relative mb-2 h-5">
+          <p
+            className="absolute inset-x-0 text-xs font-semibold uppercase tracking-[1.68px] text-[#8a7a68] transition-opacity duration-300"
+            style={{
+              opacity: !skipEnvCheck && checkOpacity > 0.5 ? 0 : 1,
+            }}
+          >
+            {tutorial
+              ? "Kickstart Tutorial Session"
+              : "Kickstart your session"}
+          </p>
+          {!skipEnvCheck ? (
+            <div
+              className="absolute inset-x-0 flex items-center gap-2 transition-opacity duration-300"
+              style={{ opacity: checkOpacity > 0.5 ? 1 : 0 }}
+            >
+              <p className="text-sm font-semibold uppercase tracking-[1.68px] text-[rgba(28,22,16,0.7)]">
+                Environment check
+              </p>
+              <span className="rounded-full bg-[rgba(200,146,42,0.18)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-gold">
+                Beta
+              </span>
+            </div>
+          ) : null}
+        </div>
+        {skipEnvCheck ? null : renderCheckPanel()}
+        <SwipeToEnter
+          key={swipeKey}
+          label="Swipe to Start"
+          onComplete={onSwipeComplete}
+        />
+        {error ? (
+          <p className="mt-2 text-center text-sm text-red-600">{error}</p>
+        ) : null}
+      </div>
+    );
+  }
+
+  // -------- Active session (one sheet, collapses smoothly) --------
+  return (
+    <div
+      className={sheetShellClass}
+      onClick={onChromeActivate}
+      role="presentation"
+    >
+      {renderHandle()}
+
+      {/* Always-present header — Session running stays put; small clock fades when expanded */}
+      <button
+        type="button"
+        className="mb-1 flex w-full cursor-pointer items-center justify-between pl-1 text-left"
+        onClick={(e) => {
+          e.stopPropagation();
+          onChromeActivate();
+        }}
+        aria-label={
+          sheetCollapsed ? "Expand session" : "Collapse session"
+        }
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="size-2 shrink-0 rounded-full bg-[#4caf50] shadow-[0_0_6px_#4caf50]" />
+          <span className="truncate text-sm font-semibold uppercase tracking-[1.68px] text-[rgba(28,22,16,0.7)]">
+            Session running
+          </span>
+          {active.isTutorial ? (
+            <span className="rounded-full bg-lavender/50 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider">
+              ×3
+            </span>
+          ) : null}
+          {checkOpen ? (
+            <span className="shrink-0 rounded-full bg-[rgba(200,146,42,0.18)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-gold">
+              Beta
+            </span>
+          ) : null}
+        </div>
+        <span
+          className="shrink-0"
+          style={{
+            opacity: compactOpacity,
+            transition: isDragging ? "none" : "opacity 0.35s ease",
+          }}
+          aria-hidden={compactOpacity < 0.05}
+        >
+          <DurationClock
+            totalSeconds={elapsed}
+            className="font-serif text-lg leading-none tracking-[2.88px] text-gold"
+          />
+        </span>
+      </button>
+
+      {/* Expanded body — no duplicate title row */}
+      <div
+        className="overflow-hidden"
+        style={{
+          height: activeBodyHeight,
+          opacity: sheetCollapsed ? activeBodyOpacity : activeBodyOpacity,
+          transition: sheetTransition,
+        }}
+      >
+        <div ref={activeBodyInnerRef}>
+          <div
+            style={{
+              opacity: checkOpacity > 0.35 ? 0 : 1,
+              maxHeight: checkOpacity > 0.35 ? 0 : 96,
+              overflow: "hidden",
+              transition: "opacity 0.3s ease, max-height 0.35s ease",
+            }}
+          >
+            <p
+              className="mb-3 flex items-center justify-center py-2 font-serif text-[48px] leading-none tracking-[2.88px] text-ink"
+              aria-live="polite"
+            >
+              <DurationClock totalSeconds={elapsed} />
+            </p>
+          </div>
+
+          {renderCheckPanel()}
+
+          <div
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <SwipeToEnter
+              key={swipeKey}
+              label="Swipe to End"
+              onComplete={onSwipeComplete}
+            />
+          </div>
+          {error ? (
+            <p className="mt-2 text-center text-sm text-red-600">{error}</p>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
