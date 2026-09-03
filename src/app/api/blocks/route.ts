@@ -3,6 +3,8 @@ import { parseUtcMs, toUtcIso } from "@/lib/datetime";
 import { createClient } from "@/lib/supabase/server";
 import type { ActiveBlockState, TimeBlock } from "@/types";
 
+type ActivityEmbed = { id: string; name: string; color: string };
+
 type BlockRow = {
   id: string;
   user_id: string;
@@ -11,18 +13,35 @@ type BlockRow = {
   ended_at: string | null;
   duration_seconds: number | null;
   note: string | null;
-  activity?: { id: string; name: string; color: string } | null;
+  activity?: ActivityEmbed | ActivityEmbed[] | null;
 };
 
-function isUniqueViolation(error: { code?: string; message?: string }) {
-  return (
-    error.code === "23505" ||
-    /duplicate key|unique constraint/i.test(error.message ?? "")
-  );
+function unwrapActivity(
+  activity: BlockRow["activity"],
+): ActivityEmbed | null {
+  if (!activity) return null;
+  return Array.isArray(activity) ? (activity[0] ?? null) : activity;
+}
+
+function asBlockRow(row: unknown): BlockRow {
+  return row as BlockRow;
+}
+
+function toTimeBlock(row: BlockRow): TimeBlock {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    activity_type_id: row.activity_type_id,
+    started_at: row.started_at,
+    ended_at: row.ended_at,
+    duration_seconds: row.duration_seconds,
+    note: row.note,
+    activity: unwrapActivity(row.activity),
+  };
 }
 
 function toActive(row: BlockRow, serverNow: string): ActiveBlockState {
-  const activity = Array.isArray(row.activity) ? row.activity[0] : row.activity;
+  const activity = unwrapActivity(row.activity);
   return {
     blockId: row.id,
     activityTypeId: row.activity_type_id,
@@ -31,6 +50,13 @@ function toActive(row: BlockRow, serverNow: string): ActiveBlockState {
     startedAt: toUtcIso(row.started_at),
     serverNow,
   };
+}
+
+function isUniqueViolation(error: { code?: string; message?: string }) {
+  return (
+    error.code === "23505" ||
+    /duplicate key|unique constraint/i.test(error.message ?? "")
+  );
 }
 
 const BLOCK_SELECT =
@@ -70,7 +96,8 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: openError.message }, { status: 500 });
   }
 
-  const active = open ? toActive(open as BlockRow, serverNow) : null;
+  const openRow = open ? asBlockRow(open) : null;
+  const active = openRow ? toActive(openRow, serverNow) : null;
 
   let blocks: TimeBlock[] = [];
   if (from && to) {
@@ -87,10 +114,10 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    const ended = (data ?? []) as TimeBlock[];
+    const ended = (data ?? []).map((row) => toTimeBlock(asBlockRow(row)));
     const openOverlaps =
-      open != null && Date.parse(toUtcIso(open.started_at)) < Date.parse(to);
-    blocks = openOverlaps ? ([open as TimeBlock, ...ended] as TimeBlock[]) : ended;
+      openRow != null && Date.parse(toUtcIso(openRow.started_at)) < Date.parse(to);
+    blocks = openOverlaps && openRow ? [toTimeBlock(openRow), ...ended] : ended;
   }
 
   return NextResponse.json({ active, serverNow, blocks });
@@ -176,9 +203,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: insertError.message }, { status: 500 });
     }
 
+    const insertedRow = asBlockRow(inserted);
     return NextResponse.json({
-      active: toActive(inserted as BlockRow, startedAt),
-      block: inserted,
+      active: toActive(insertedRow, startedAt),
+      block: toTimeBlock(insertedRow),
     });
   }
 
@@ -215,7 +243,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: endError.message }, { status: 500 });
     }
 
-    return NextResponse.json({ block: updated, active: null });
+    return NextResponse.json({
+      block: toTimeBlock(asBlockRow(updated)),
+      active: null,
+    });
   }
 
   return NextResponse.json(

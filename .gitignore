@@ -30,12 +30,13 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files
+# env files — keep secrets local; allow the template
 .env*
+!.env.example
 
 # vercel
 .vercel
 
-# typescript
+# typescript — Next.js regenerates next-env.d.ts on `next build` / `next dev`
 *.tsbuildinfo
 next-env.d.ts
