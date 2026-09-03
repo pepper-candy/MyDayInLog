@@ -18,12 +18,30 @@ const siteDescription =
   "Log focus sessions by activity. Name the block, swipe to start and end, see where the hours went.";
 
 export const metadata: Metadata = {
+  metadataBase: new URL("https://mydayinlog.vercel.app"),
   title: {
-    default: "MyDayInLog",
-    template: "%s · MyDayInLog",
+    default: "My Day In Log",
+    template: "%s · My Day In Log",
   },
   description: siteDescription,
-  applicationName: "MyDayInLog",
+  applicationName: "My Day In Log",
+  icons: {
+    icon: [{ url: "/brand/icon_d.png", type: "image/png" }],
+    apple: [{ url: "/brand/icon_d.png", type: "image/png" }],
+    shortcut: "/brand/icon_d.png",
+  },
+  appleWebApp: {
+    title: "My Day In Log",
+    capable: true,
+    statusBarStyle: "default",
+  },
+  openGraph: {
+    title: "My Day In Log",
+    description: siteDescription,
+    url: "https://mydayinlog.vercel.app",
+    siteName: "My Day In Log",
+    type: "website",
+  },
 };
 
 export const viewport: Viewport = {
