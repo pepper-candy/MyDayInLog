@@ -2,6 +2,8 @@
 
 Name the block. Log the hours.
 
+**Live:** [https://mydayinlog.vercel.app](https://mydayinlog.vercel.app)
+
 A small daily time log: pick what you are doing, swipe to start, swipe to end. The day fills in as a 24-hour bar, a pie of your blocks, and a chronological log. Unlogged time is simply leftover — nothing is guessed for you.
 
 It is a sibling to **Milestone**, not a fork. Same cozy phone-width shell and passcode sign-in. No gems, tasks, or mentors.
@@ -12,7 +14,7 @@ It is a sibling to **Milestone**, not a fork. Same cozy phone-width shell and pa
 
 ### 1. Sign in
 
-1. Open the app.
+1. Open [https://mydayinlog.vercel.app](https://mydayinlog.vercel.app).
 2. Type your **5-character passcode**. After a short pause it signs you in by itself.
 3. First time? Tap **Start MyDayInLog**. The app fills in an unused code, then signs you up. **Write that code down** — it is the only way back in. There is no email reset.
 
@@ -123,4 +125,12 @@ You can add your own. Old template names Errands, Screen, and Other are archived
 
 ## Deploy
 
-Same as any Next.js app (Vercel works well). Set the four env vars on the host, and point the production URL at the same Supabase project. Run the SQL on that project before the first signup.
+Production is on Vercel: [https://mydayinlog.vercel.app](https://mydayinlog.vercel.app).
+
+Same as any Next.js app. Set the four env vars on the host, and point the production URL at the same Supabase project. Run the SQL on that project before the first signup.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Pepper Candy.
