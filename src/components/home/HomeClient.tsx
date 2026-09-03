@@ -192,7 +192,7 @@ export function HomeClient({
         ref={headerRef}
         className="fixed inset-x-0 top-0 z-40 mx-auto w-full max-w-[475px] rounded-b-[24px] bg-[rgba(255,250,242,0.97)] shadow-[0px_4px_32px_0px_rgba(200,146,42,0.12)]"
       >
-        <div className="flex items-center justify-between px-5 pt-3 pb-0">
+        <div className="flex items-center justify-between px-5 pb-2 pt-4">
           <div className="min-w-0">
             <p className="text-[11px] font-semibold uppercase tracking-[1.4px] text-gold">
               {profile.nickname}

@@ -27,8 +27,8 @@ export function DailyBreakdown({
   const unlogged = Math.max(0, SECONDS_PER_DAY - totalSeconds);
 
   return (
-    <section className="px-5 pb-3 pt-1.5">
-      <div className="mb-2 flex items-center justify-between gap-2">
+    <section className="px-5 pb-4 pt-3">
+      <div className="mb-3 flex items-center justify-between gap-2">
         <button
           type="button"
           onClick={onPrev}
